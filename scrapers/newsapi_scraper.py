@@ -2,28 +2,15 @@ import os
 import requests
 from datetime import datetime, timedelta
 
-
 NEWSAPI_ENDPOINT = "https://newsapi.org/v2/everything"
 
-# (query, source_region)
 QUERIES = [
-    # India-perspective
-    ("India Germany trade import export", "India"),
-    ("India EU import Germany", "India"),
-    ("India European Union export Germany", "India"),
-    ("India EU FTA free trade agreement", "India"),
-    ("India Germany business opportunity", "India"),
-    ("India EU tariff customs duty", "India"),
-    ("Germany import India products", "India"),
-    ("India export Europe opportunity", "India"),
-    # EU-perspective
-    ("Germany India trade 2025", "EU"),
-    ("EU India trade agreement news", "EU"),
-    ("European Union Asia trade policy", "EU"),
-    ("Germany export Asia opportunity", "EU"),
-    ("EU India investment news", "EU"),
+    # query, category
+    ("generative AI enterprise", "AI"),
+    ("artificial intelligence telecom", "AI"),
+    ("SAP S/4HANA cloud", "SAP"),
+    ("SAP Business Technology Platform", "SAP"),
 ]
-
 
 def fetch_articles() -> list[dict]:
     api_key = os.environ.get("NEWSAPI_KEY", "")
@@ -35,13 +22,13 @@ def fetch_articles() -> list[dict]:
     seen_urls = set()
     articles = []
 
-    for query, source_region in QUERIES:
+    for query, category in QUERIES:
         params = {
             "q": query,
             "from": from_date,
             "sortBy": "relevancy",
             "language": "en",
-            "pageSize": 10,
+            "pageSize": 5,
             "apiKey": api_key,
         }
         try:
@@ -56,7 +43,7 @@ def fetch_articles() -> list[dict]:
                         "title": item.get("title", ""),
                         "url": url,
                         "source": item.get("source", {}).get("name", "NewsAPI"),
-                        "source_region": source_region,
+                        "category": category,
                         "published_at": item.get("publishedAt", ""),
                         "description": item.get("description", "") or "",
                     })

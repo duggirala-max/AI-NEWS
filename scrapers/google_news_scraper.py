@@ -2,20 +2,14 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 
-
-# (query, source_region)
 SEARCH_QUERIES = [
-    # India-perspective
-    ("India Germany trade news today", "India"),
-    ("India EU import export opportunity 2025", "India"),
-    ("India Germany business deal latest", "India"),
-    ("Germany import India products 2025", "India"),
-    ("India European Union FTA trade update", "India"),
-    # EU-perspective
-    ("Germany India business 2025", "EU"),
-    ("EU Asia trade news today", "EU"),
-    ("European Union India trade policy news", "EU"),
-    ("Deutschland Indien Handel aktuell", "EU"),
+    # query, category
+    ("artificial intelligence news today", "AI"),
+    ("generative AI enterprise", "AI"),
+    ("AI telecom industry", "AI"),
+    ("SAP S/4HANA news today", "SAP"),
+    ("SAP BTP enterprise news", "SAP"),
+    ("SAP AI Joule update", "SAP"),
 ]
 
 HEADERS = {
@@ -26,19 +20,19 @@ HEADERS = {
     )
 }
 
-
 def fetch_articles() -> list[dict]:
     seen_urls = set()
     articles = []
 
-    for query, source_region in SEARCH_QUERIES:
+    for query, category in SEARCH_QUERIES:
         url = f"https://news.google.com/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
         try:
             resp = requests.get(url, headers=HEADERS, timeout=15)
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            for article_tag in soup.select("article")[:8]:
+            # Fetch top 5 from each query
+            for article_tag in soup.select("article")[:5]:
                 title_tag = article_tag.find("a", class_=lambda c: c and "title" in c.lower()) \
                             or article_tag.find("h3") \
                             or article_tag.find("h4")
@@ -70,7 +64,7 @@ def fetch_articles() -> list[dict]:
                     "title": title,
                     "url": article_url,
                     "source": source,
-                    "source_region": source_region,
+                    "category": category,
                     "published_at": published,
                     "description": "",
                 })

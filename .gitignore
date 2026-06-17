@@ -1,6 +1,5 @@
 .env
-__pycache__/
-*.pyc
-*.pyo
-.DS_Store
 *.pdf
+seen_articles.json
+__pycache__/
+.DS_Store

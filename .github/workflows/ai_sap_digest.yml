@@ -1,0 +1,59 @@
+name: Telekom AI & SAP News Intelligence Digest
+
+on:
+  schedule:
+    # 06:00 AM CET = 05:00 UTC
+    - cron: "0 5 * * *"
+  workflow_dispatch:  # Allows manual runs from GitHub tab
+
+jobs:
+  run-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Cache seen_articles.json cross-run to prevent duplicate emails across runs
+      - name: Cache Deduplication Cache
+        uses: actions/cache@v4
+        with:
+          path: seen_articles.json
+          key: ${{ runner.os }}-dedup-cache-${{ github.run_number }}
+          restore-keys: |
+            ${{ runner.os }}-dedup-cache-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Export CC Secrets as Environment Variables
+        env:
+          SECRETS_CONTEXT: ${{ toJson(secrets) }}
+        run: |
+          # Parse secrets dynamically and export any key starting with RECIPIENT_CC
+          # Using ascii_upcase makes it case-insensitive
+          echo "$SECRETS_CONTEXT" | jq -r 'to_entries[] | select(.key | ascii_upcase | startswith("RECIPIENT_CC")) | "\(.key)=\(.value)"' >> $GITHUB_ENV
+
+      - name: Run Pipeline
+        env:
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          PYTHONUNBUFFERED: "1"
+        run: python main.py
