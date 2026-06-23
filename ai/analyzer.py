@@ -103,6 +103,9 @@ def score_article(article: dict) -> dict:
     # Translate first if needed
     article = translate_article(article)
 
+    # Preserve original category from scrapers to prevent AI overwrite
+    original_category = article.get("category")
+
     client = _client()
     prompt = SCORE_PROMPT.format(
         title=article.get("title", ""),
@@ -127,6 +130,10 @@ def score_article(article: dict) -> dict:
             * int(scores.get("impact_score", 0))
         )
         
+        # Restore original category
+        if original_category:
+            article["category"] = original_category
+            
         # Ensure category is normalized
         valid_cats = {"AI", "SAP"}
         if article.get("category") not in valid_cats:
