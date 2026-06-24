@@ -33,8 +33,8 @@ Article title: {title}
 Source: {source}
 Description: {description}
 URL: {url}
-
-Return ONLY the JSON object, no markdown fences, no explanation."""
+Return ONLY the JSON object, no markdown fences, no explanation.
+IMPORTANT: The output MUST be strictly valid JSON. Ensure all keys and string values are enclosed in double quotes. Do not use unescaped quotes within strings."""
 
 EXEC_SUMMARY_PROMPT = """You are a senior technology analyst writing a daily briefing for a Deutsche Telekom manager.
 

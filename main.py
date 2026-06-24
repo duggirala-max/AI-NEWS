@@ -58,7 +58,12 @@ def run() -> None:
     MAX_TO_SCORE = 50
     if len(unseen_articles) > MAX_TO_SCORE:
         print(f"Capping to {MAX_TO_SCORE} articles before scoring (was {len(unseen_articles)}).")
-        unseen_articles = unseen_articles[:MAX_TO_SCORE]
+        # Split by category to ensure we don't starve SAP (which are appended last)
+        ai_unseen = [a for a in unseen_articles if a.get("category") == "AI"]
+        sap_unseen = [a for a in unseen_articles if a.get("category") == "SAP"]
+        
+        # Take up to 35 AI and up to 15 SAP
+        unseen_articles = ai_unseen[:35] + sap_unseen[:15]
 
     # 4. Score
     print(f"\n[Step 3] Scoring {len(unseen_articles)} articles with Groq AI...")
