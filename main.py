@@ -1,4 +1,7 @@
 import os
+import sys
+import datetime
+import holidays
 from dotenv import load_dotenv
 
 # Load env vars before loading other modules
@@ -31,6 +34,24 @@ def run() -> None:
     print("=" * 60)
     print("Telekom AI & SAP News Intelligence Pipeline — Starting")
     print("=" * 60)
+
+    # Only enforce schedule limits if running via a scheduled cron job
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        today = datetime.date.today()
+
+        # Check for German holidays
+        de_holidays = holidays.Germany()
+        if today in de_holidays:
+            print(f"Today ({today}) is a German holiday ({de_holidays.get(today)}). Skipping run.")
+            sys.exit(0)
+
+        # Enforce Monday/Thursday schedule (in case of timezone drift)
+        # 0 = Monday, 3 = Thursday
+        if today.weekday() not in [0, 3]:
+            print(f"Today ({today}) is not Monday or Thursday. Skipping run.")
+            sys.exit(0)
+    else:
+        print("Manual trigger detected (or running locally). Bypassing schedule checks.")
 
     # 1. Collect
     print("\n[Step 1] Collecting articles from all sources...")

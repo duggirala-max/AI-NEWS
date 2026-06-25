@@ -18,7 +18,8 @@ def fetch_articles() -> list[dict]:
         print("[NewsAPI] NEWSAPI_KEY not set — skipping.")
         return []
 
-    from_date = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+    # Fetch up to 7 days back to cover the gaps between Mon and Thu runs, including weekends/holidays.
+    from_date = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
     seen_urls = set()
     articles = []
 
@@ -28,7 +29,7 @@ def fetch_articles() -> list[dict]:
             "from": from_date,
             "sortBy": "relevancy",
             "language": "en",
-            "pageSize": 5,
+            "pageSize": 20,
             "apiKey": api_key,
         }
         try:

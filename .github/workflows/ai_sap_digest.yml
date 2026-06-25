@@ -3,7 +3,7 @@ name: Telekom AI & SAP News Intelligence Digest
 on:
   schedule:
     # 06:00 AM CET = 05:00 UTC
-    - cron: "0 5 * * *"
+    - cron: "0 5 * * 1,4"
   workflow_dispatch:  # Allows manual runs from GitHub tab
 
 jobs:
