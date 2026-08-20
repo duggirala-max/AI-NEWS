@@ -3,9 +3,9 @@ import json
 import time
 import concurrent.futures
 import threading
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
-GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 MODEL_NAME = "gemini-1.5-flash"
 
 SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
@@ -60,23 +60,23 @@ def t_print(*args, **kwargs):
     with PRINT_LOCK:
         print(*args, **kwargs)
 
-def _client() -> OpenAI:
+def _client() -> genai.Client:
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not set.")
-    return OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL)
+    return genai.Client(api_key=api_key)
 
 def _call_gemini(client, prompt, response_format=None, max_tokens=4096, temperature=0.2, parse_json=False):
     global LAST_REQUEST_TIME
 
-    kwargs = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
+    config_kwargs = {
         "temperature": temperature,
+        "max_output_tokens": max_tokens,
     }
-    if response_format:
-        kwargs["response_format"] = response_format
+    if response_format and response_format.get("type") == "json_object":
+        config_kwargs["response_mime_type"] = "application/json"
+        
+    config = types.GenerateContentConfig(**config_kwargs)
 
     for attempt in range(3):
         try:
@@ -88,8 +88,12 @@ def _call_gemini(client, prompt, response_format=None, max_tokens=4096, temperat
                     time.sleep(4.1 - elapsed)
                 LAST_REQUEST_TIME = time.monotonic()
 
-            resp = client.chat.completions.create(**kwargs)
-            content = (resp.choices[0].message.content or "").strip()
+            resp = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+                config=config
+            )
+            content = (resp.text or "").strip()
 
             if parse_json:
                 # Strip markdown fences Gemini may wrap around JSON
