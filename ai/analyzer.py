@@ -4,7 +4,13 @@ import time
 from openai import OpenAI
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = "z-ai/glm-5.2:free"
+OPENROUTER_MODELS = [
+    "z-ai/glm-5.2:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free"
+]
 
 SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
 Deutsche Telekom is a leading European telecommunications provider with a strong interest in AI adoption, network automation, digital sovereignty, enterprise software (strategic partnership with SAP, BTP integration), security, and customer experience.
@@ -54,6 +60,28 @@ def _client() -> OpenAI:
         raise ValueError("OPENROUTER_API_KEY is not set.")
     return OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
+def _call_openrouter_with_fallback(client, prompt, response_format=None, max_tokens=4096, temperature=0.2):
+    last_exc = None
+    for model in OPENROUTER_MODELS:
+        try:
+            kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if response_format:
+                kwargs["response_format"] = response_format
+                
+            resp = client.chat.completions.create(**kwargs)
+            time.sleep(2)
+            return resp.choices[0].message.content.strip()
+        except Exception as exc:
+            print(f"      [Fallback] Model {model} failed: {exc}")
+            last_exc = exc
+            time.sleep(2)
+    raise last_exc
+
 def translate_article(article: dict) -> dict:
     """Translate title and description to English if non-ASCII characters are detected."""
     title = article.get("title", "")
@@ -70,15 +98,12 @@ def translate_article(article: dict) -> dict:
             "Return ONLY a valid JSON object with keys \"title\" and \"description\".\n\n"
             f"title: {title}\ndescription: {description[:300]}"
         )
-        resp = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            max_tokens=4096,
-            temperature=0.2,
+        raw = _call_openrouter_with_fallback(
+            client,
+            prompt,
+            response_format={"type": "json_object"}
         )
-        time.sleep(2)
-        data = json.loads(resp.choices[0].message.content.strip())
+        data = json.loads(raw)
         article["title"] = data.get("title", title)
         article["description"] = data.get("description", description)
         article["translated"] = True
@@ -115,15 +140,11 @@ def score_article(article: dict) -> dict:
         url=article.get("url", ""),
     )
     try:
-        resp = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            max_tokens=4096,
-            temperature=0.2,
+        raw = _call_openrouter_with_fallback(
+            client,
+            prompt,
+            response_format={"type": "json_object"}
         )
-        time.sleep(2)
-        raw = resp.choices[0].message.content.strip()
         scores = json.loads(raw)
         article.update(scores)
         
@@ -143,7 +164,7 @@ def score_article(article: dict) -> dict:
         if article.get("category") not in valid_cats:
             article["category"] = article.get("category", "AI")
     except Exception as exc:
-        print(f"[Groq Score] Error scoring '{article.get('title', '')}': {exc}")
+        print(f"[OpenRouter Score] Error scoring '{article.get('title', '')}': {exc}")
         # Error fallback
         article.update({
             "relevance_score": 0,
@@ -173,14 +194,13 @@ def generate_executive_summary(articles: list[dict]) -> str:
     )
     prompt = EXEC_SUMMARY_PROMPT.format(articles_text=articles_text)
     try:
-        resp = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
+        summary = _call_openrouter_with_fallback(
+            client,
+            prompt,
+            response_format=None,
             max_tokens=2048,
-            temperature=0.4,
+            temperature=0.4
         )
-        time.sleep(2)
-        summary = resp.choices[0].message.content.strip()
         print(f"[OpenRouter Exec] Executive summary generated ({len(summary)} chars).")
         return summary
     except Exception as exc:
