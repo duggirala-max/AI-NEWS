@@ -1,43 +1,42 @@
 import os
 import json
 import time
-import concurrent.futures
+import uuid
 import threading
 from google import genai
 from google.genai import types
 
 MODEL_NAME = "gemini-3.6-flash"
 
-SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
+BATCH_SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
 Deutsche Telekom is a leading European telecommunications provider with a strong interest in AI adoption, network automation, digital sovereignty, enterprise software (strategic partnership with SAP, BTP integration), security, and customer experience.
 
-Analyze the news article below and return ONLY a valid JSON object with these exact keys:
+I will provide you with a JSON list of news articles. Analyze EACH article and return a JSON object containing the scored results.
+Your output MUST be a JSON object with a single key "articles", which contains a list of objects in the EXACT same order as the input articles.
+
+For each article, return these exact keys:
 {{
-  "relevance_score": 8,
-  "credibility_score": 9,
-  "impact_score": 7,
-  "category": "AI",
+  "id": "<copy the id from the input>",
+  "relevance_score": <integer 1-10>,
+  "credibility_score": <integer 1-10>,
+  "impact_score": <integer 1-10>,
+  "category": "<Must be exactly 'AI' or 'SAP'>",
   "summary": "<2-3 sentence factual summary in English>",
   "telekom_relevance": "<2-3 sentences explaining why this matters specifically to a manager at Deutsche Telekom. Connect it to network ops, BTP/SAP partnership, cloud infrastructure, T-Systems, security, or enterprise services.>",
-  "key_takeaway": "<One punchy, highly practical sentence that this manager could quote in an executive meeting.>"
+  "key_takeaway": "<One punchy, highly practical sentence that this manager could quote in an executive meeting.>",
+  "translated_title": "<Translate the title to English if it is not in English, otherwise copy the original>",
+  "translated_description": "<Translate the description to English if it is not in English, otherwise copy the original>"
 }}
 
-Replace the example values with your actual scores (integers 1-10) and correct category string.
-category MUST be exactly one of: "AI" or "SAP".
-
 Scoring guide:
-- relevance_score: How relevant is this to a manager at a major telecom provider (Deutsche Telekom) and its systems?
+- relevance_score: How relevant is this to a manager at a major telecom provider (Deutsche Telekom)?
 - credibility_score: How credible is the source/reporting? (10 = Reuters/FT/DW/Official PR, 1 = unknown blog)
 - impact_score: How much strategic or operational impact does this technology or event have?
 
-If the article is in a language other than English (e.g. German), translate the title and description to English before analysis.
+Input Articles:
+{articles_json}
 
-Article title: {title}
-Source: {source}
-Description: {description}
-URL: {url}
-Return ONLY the JSON object, no markdown fences, no explanation.
-IMPORTANT: The output MUST be strictly valid JSON. Ensure all keys and string values are enclosed in double quotes. Do not use unescaped quotes within strings."""
+IMPORTANT: Return ONLY a valid JSON object with the "articles" list. Ensure strictly valid JSON."""
 
 EXEC_SUMMARY_PROMPT = """You are a senior technology analyst writing a daily briefing for a Deutsche Telekom manager.
 
@@ -66,7 +65,7 @@ def _client() -> genai.Client:
         raise ValueError("GEMINI_API_KEY is not set.")
     return genai.Client(api_key=api_key)
 
-def _call_gemini(client, prompt, response_format=None, max_tokens=4096, temperature=0.2, parse_json=False):
+def _call_gemini(client, prompt, response_format=None, max_tokens=8192, temperature=0.2, parse_json=False):
     global LAST_REQUEST_TIME
 
     config_kwargs = {
@@ -78,14 +77,15 @@ def _call_gemini(client, prompt, response_format=None, max_tokens=4096, temperat
         
     config = types.GenerateContentConfig(**config_kwargs)
 
-    for attempt in range(3):
+    for attempt in range(4):
         try:
-            # Rate-limit pacing INSIDE retry loop — enforces 15 RPM (4.1s spacing)
+            # Enforce 5 RPM limit (12.1s spacing to be extremely safe)
+            # Since we only do ~5 requests total in the whole run, this guarantees no 429s.
             with API_DISPATCH_LOCK:
                 now = time.monotonic()
                 elapsed = now - LAST_REQUEST_TIME
-                if elapsed < 4.1:
-                    time.sleep(4.1 - elapsed)
+                if elapsed < 12.1:
+                    time.sleep(12.1 - elapsed)
                 LAST_REQUEST_TIME = time.monotonic()
 
             resp = client.models.generate_content(
@@ -96,7 +96,6 @@ def _call_gemini(client, prompt, response_format=None, max_tokens=4096, temperat
             content = (resp.text or "").strip()
 
             if parse_json:
-                # Strip markdown fences Gemini may wrap around JSON
                 clean = content.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
                 parsed = json.loads(clean)
                 if not isinstance(parsed, dict):
@@ -106,125 +105,109 @@ def _call_gemini(client, prompt, response_format=None, max_tokens=4096, temperat
             return content
 
         except Exception as exc:
-            t_print(f"      [Retry {attempt+1}/3] Gemini failed: {exc}")
-            if attempt == 2:
+            err_msg = str(exc)
+            t_print(f"      [Retry {attempt+1}/4] Gemini failed: {err_msg}")
+            if attempt == 3:
                 raise
-            time.sleep(2)
+            
+            # Dynamic backoff based on error type
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                t_print("      [Retry] 429 Quota Exceeded. Backing off for 65 seconds...")
+                time.sleep(65)
+            elif "503" in err_msg or "UNAVAILABLE" in err_msg:
+                t_print("      [Retry] 503 Service Unavailable. Backing off for 10 seconds...")
+                time.sleep(10)
+            else:
+                time.sleep(5)
 
-    raise Exception("Gemini API failed after 3 attempts.")
-
-def translate_article(article: dict) -> dict:
-    """Translate title and description to English if non-ASCII characters are detected."""
-    title = article.get("title", "")
-    description = article.get("description", "")
-    has_non_ascii = any(ord(c) > 127 for c in title + description)
-    if not has_non_ascii:
-        return article
-    if not os.environ.get("GEMINI_API_KEY", ""):
-        return article
-    try:
-        client = _client()
-        prompt = (
-            "Translate the following news article fields from their original language to English. "
-            "Return ONLY a valid JSON object with keys \"title\" and \"description\".\n\n"
-            f"title: {title}\ndescription: {description[:300]}"
-        )
-        data = _call_gemini(
-            client,
-            prompt,
-            response_format={"type": "json_object"},
-            parse_json=True
-        )
-        article["title"] = data.get("title", title)
-        article["description"] = data.get("description", description)
-        article["translated"] = True
-        t_print(f"[Translate] Translated: {article['title'][:60]}")
-    except Exception as exc:
-        t_print(f"[Translate] Error translating '{title[:40]}': {exc}")
-    return article
-
-def score_article(article: dict) -> dict:
-    if not os.environ.get("GEMINI_API_KEY", ""):
-        # Fallback values if API key is not present
-        article.update({
-            "relevance_score": 5,
-            "credibility_score": 5,
-            "impact_score": 5,
-            "composite_score": 125,
-            "summary": article.get("description", "") or "No description available.",
-            "telekom_relevance": "N/A — GEMINI_API_KEY not set. Relevance cannot be assessed.",
-            "key_takeaway": "N/A — GEMINI_API_KEY not set."
-        })
-        return article
-
-    # Translate first if needed
-    article = translate_article(article)
-
-    # Preserve original category from scrapers to prevent AI overwrite
-    original_category = article.get("category")
-
-    client = _client()
-    prompt = SCORE_PROMPT.format(
-        title=article.get("title", ""),
-        source=article.get("source", ""),
-        description=(article.get("description", "") or "")[:300],
-        url=article.get("url", ""),
-    )
-    try:
-        scores = _call_gemini(
-            client,
-            prompt,
-            response_format={"type": "json_object"},
-            parse_json=True
-        )
-        article.update(scores)
-
-        # Calculate composite score (relevance * credibility * impact)
-        article["composite_score"] = (
-            int(scores.get("relevance_score", 0))
-            * int(scores.get("credibility_score", 0))
-            * int(scores.get("impact_score", 0))
-        )
-
-        # Restore original category
-        if original_category:
-            article["category"] = original_category
-
-        # Ensure category is normalized
-        valid_cats = {"AI", "SAP"}
-        if article.get("category") not in valid_cats:
-            article["category"] = article.get("category", "AI")
-    except Exception as exc:
-        t_print(f"[Gemini Score] Error scoring '{article.get('title', '')}': {exc}")
-        # Error fallback
-        article.update({
-            "relevance_score": 0,
-            "credibility_score": 0,
-            "impact_score": 0,
-            "composite_score": 0,
-            "summary": article.get("description", "") or "Error during analysis.",
-            "telekom_relevance": "Error evaluating Telekom relevance.",
-            "key_takeaway": "Error evaluating key takeaway.",
-        })
-    return article
+    raise Exception("Gemini API failed after 4 attempts.")
 
 def score_all(articles: list[dict]) -> list[dict]:
-    scored = [None] * len(articles)
-    t_print(f"[Gemini Score] Scoring {len(articles)} articles concurrently...")
+    if not os.environ.get("GEMINI_API_KEY", ""):
+        t_print("[Gemini Score] GEMINI_API_KEY not set. Skipping AI scoring.")
+        return articles
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(score_article, article): i for i, article in enumerate(articles)}
-        for future in concurrent.futures.as_completed(futures):
-            idx = futures[future]
-            try:
-                scored[idx] = future.result()
-                completed = sum(1 for x in scored if x is not None)
-                title_snip = scored[idx].get('title', '')[:60] if scored[idx] else 'Unknown'
-                t_print(f"[Gemini Score] Completed {completed}/{len(articles)}: {title_snip}")
-            except Exception as exc:
-                t_print(f"[Gemini Score] Error scoring article {idx}: {exc}")
+    client = _client()
+    scored_articles = []
+    
+    # Assign temporary IDs to match them up later
+    for a in articles:
+        a["_temp_id"] = str(uuid.uuid4())
+        # Preserve original category
+        a["_original_category"] = a.get("category")
+    
+    # Batch size 15 articles per request
+    chunk_size = 15
+    chunks = [articles[i:i + chunk_size] for i in range(0, len(articles), chunk_size)]
+    
+    t_print(f"[Gemini Score] Scoring {len(articles)} articles in {len(chunks)} batches...")
 
-    return [s for s in scored if s is not None]
+    for chunk_idx, chunk in enumerate(chunks):
+        t_print(f"[Gemini Score] Processing batch {chunk_idx + 1}/{len(chunks)} ({len(chunk)} articles)...")
+        
+        # Prepare lightweight JSON for prompt
+        input_json = []
+        for a in chunk:
+            input_json.append({
+                "id": a["_temp_id"],
+                "title": a.get("title", ""),
+                "source": a.get("source", ""),
+                "description": (a.get("description", "") or "")[:300],
+                "url": a.get("url", "")
+            })
+            
+        prompt = BATCH_SCORE_PROMPT.format(articles_json=json.dumps(input_json, indent=2))
+        
+        try:
+            result = _call_gemini(
+                client,
+                prompt,
+                response_format={"type": "json_object"},
+                parse_json=True
+            )
+            
+            returned_list = result.get("articles", [])
+            
+            # Map back to original articles
+            id_to_scores = {str(item.get("id")): item for item in returned_list if isinstance(item, dict)}
+            
+            for a in chunk:
+                scores = id_to_scores.get(str(a["_temp_id"]))
+                if scores:
+                    a.update(scores)
+                    a["composite_score"] = (
+                        int(scores.get("relevance_score", 0))
+                        * int(scores.get("credibility_score", 0))
+                        * int(scores.get("impact_score", 0))
+                    )
+                    # Use translated text
+                    a["title"] = scores.get("translated_title", a.get("title", ""))
+                    a["description"] = scores.get("translated_description", a.get("description", ""))
+                    a["translated"] = True
+                else:
+                    # Fallback if ID was missing from AI output
+                    a["composite_score"] = 0
+                    a["telekom_relevance"] = "Failed to parse AI output."
+                    
+                # Restore original category
+                if a.get("_original_category"):
+                    a["category"] = a["_original_category"]
+                    
+                valid_cats = {"AI", "SAP"}
+                if a.get("category") not in valid_cats:
+                    a["category"] = "AI"
+                    
+                scored_articles.append(a)
+                t_print(f"[Gemini Score] Scored: {a.get('title', '')[:60]}")
+                
+        except Exception as exc:
+            t_print(f"[Gemini Score] Error scoring batch {chunk_idx + 1}: {exc}")
+            # Add back with zero scores
+            for a in chunk:
+                a["composite_score"] = 0
+                scored_articles.append(a)
+
+    return scored_articles
 
 def generate_executive_summary(articles: list[dict]) -> str:
     if not os.environ.get("GEMINI_API_KEY", ""):
