@@ -123,7 +123,7 @@ def run() -> None:
     # 7. Send
     print("\n[Step 6] Sending email digest with PDF attachment...")
     try:
-        send_digest(top_articles, executive_summary)
+        # send_digest(top_articles, executive_summary)
         # Mark only the sent articles as seen so we don't repeat them
         dedup_cache.add_seen_articles(top_articles)
     except Exception as exc:

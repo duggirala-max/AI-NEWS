@@ -3,7 +3,7 @@ import json
 from openai import OpenAI
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "llama-3.3-70b-specdec"
 
 SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
 Deutsche Telekom is a leading European telecommunications provider with a strong interest in AI adoption, network automation, digital sovereignty, enterprise software (strategic partnership with SAP, BTP integration), security, and customer experience.
@@ -38,12 +38,9 @@ IMPORTANT: The output MUST be strictly valid JSON. Ensure all keys and string va
 
 EXEC_SUMMARY_PROMPT = """You are a senior technology analyst writing a daily briefing for a Deutsche Telekom manager.
 
-Below are today's top AI and SAP news articles (titles, categories, and Telekom-relevance notes).
+Below are today's top AI and SAP news articles.
 
-Write a concise executive briefing in plain text with exactly this structure:
-1. Two sentences summarising today's overall technology/enterprise landscape (specifically AI and SAP developments).
-2. Between 3 and 5 bullet points (use "• " prefix). Each bullet names ONE development, its category, and a concise action/insight for a Telekom manager.
-3. One final line starting with "TOP INSIGHT: " — the single most critical thing for a Telekom manager to know or act on today.
+Write a concise executive briefing in plain text. It must be exactly 2 sentences long. The first sentence should summarize today's technology landscape (AI/SAP), and the second sentence must be a funny, witty, or humorous remark related to today's news.
 
 Articles:
 {articles_text}
