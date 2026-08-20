@@ -4,8 +4,8 @@ import time
 import re
 from openai import OpenAI
 
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-GROQ_MODEL = "qwen/qwen3.6-27b"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
 
 def _strip_think(text: str) -> str:
     """Remove <think>...</think> blocks that Qwen reasoning models emit."""
@@ -63,10 +63,10 @@ Articles:
 Rules: plain text only, no markdown headers, no asterisks, no bold tags."""
 
 def _client() -> OpenAI:
-    api_key = os.environ.get("GROQ_API_KEY", "")
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
-        raise ValueError("GROQ_API_KEY is not set.")
-    return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
+        raise ValueError("OPENROUTER_API_KEY is not set.")
+    return OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
 def translate_article(article: dict) -> dict:
     """Translate title and description to English if non-ASCII characters are detected."""
@@ -75,7 +75,7 @@ def translate_article(article: dict) -> dict:
     has_non_ascii = any(ord(c) > 127 for c in title + description)
     if not has_non_ascii:
         return article
-    if not os.environ.get("GROQ_API_KEY", ""):
+    if not os.environ.get("OPENROUTER_API_KEY", ""):
         return article
     try:
         client = _client()
@@ -85,7 +85,7 @@ def translate_article(article: dict) -> dict:
             f"title: {title}\ndescription: {description[:300]}"
         )
         resp = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=OPENROUTER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=4096,
             temperature=0.2,
@@ -101,7 +101,7 @@ def translate_article(article: dict) -> dict:
     return article
 
 def score_article(article: dict) -> dict:
-    if not os.environ.get("GROQ_API_KEY", ""):
+    if not os.environ.get("OPENROUTER_API_KEY", ""):
         # Fallback values if API key is not present
         article.update({
             "relevance_score": 5,
@@ -109,8 +109,8 @@ def score_article(article: dict) -> dict:
             "impact_score": 5,
             "composite_score": 125,
             "summary": article.get("description", "") or "No description available.",
-            "telekom_relevance": "N/A — GROQ_API_KEY not set. Relevance cannot be assessed.",
-            "key_takeaway": "N/A — GROQ_API_KEY not set."
+            "telekom_relevance": "N/A — OPENROUTER_API_KEY not set. Relevance cannot be assessed.",
+            "key_takeaway": "N/A — OPENROUTER_API_KEY not set."
         })
         return article
 
@@ -129,7 +129,7 @@ def score_article(article: dict) -> dict:
     )
     try:
         resp = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=OPENROUTER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=4096,
             temperature=0.2,
@@ -176,8 +176,8 @@ def score_all(articles: list[dict]) -> list[dict]:
     return scored
 
 def generate_executive_summary(articles: list[dict]) -> str:
-    if not os.environ.get("GROQ_API_KEY", ""):
-        return "Executive summary not available: GROQ_API_KEY is not set."
+    if not os.environ.get("OPENROUTER_API_KEY", ""):
+        return "Executive summary not available: OPENROUTER_API_KEY is not set."
     client = _client()
     articles_text = "\n".join(
         f"- [{a.get('category', 'AI')}] {a.get('title', '')} | {a.get('telekom_relevance', '')[:200]}"
@@ -186,7 +186,7 @@ def generate_executive_summary(articles: list[dict]) -> str:
     prompt = EXEC_SUMMARY_PROMPT.format(articles_text=articles_text)
     try:
         resp = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=OPENROUTER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2048,
             temperature=0.4,
