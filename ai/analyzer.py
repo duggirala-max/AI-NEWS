@@ -35,7 +35,8 @@ Scoring guide:
 Input Article:
 {article_json}
 
-IMPORTANT: Extract information verbatim where possible. Do NOT infer or make up facts. Return ONLY a valid JSON object matching the required schema."""
+IMPORTANT: Extract information verbatim where possible. Do NOT infer or make up facts. Return ONLY a valid JSON object matching the required schema:
+{schema_json}"""
 
 EXEC_SUMMARY_PROMPT = """You are a senior technology analyst writing a daily briefing for a Deutsche Telekom manager.
 
@@ -72,13 +73,14 @@ def _call_gemini_score(client, prompt: str) -> ArticleScore:
         temperature=0.2,
         max_output_tokens=8192,
         response_mime_type="application/json",
+        response_schema=ArticleScore,
     )
 
     for attempt in range(4):
         try:
             with API_DISPATCH_LOCK:
                 now = time.monotonic()
-                wake_time = max(now, LAST_REQUEST_TIME + 2.1)
+                wake_time = max(now, LAST_REQUEST_TIME + 4.1)
                 LAST_REQUEST_TIME = wake_time
 
             sleep_duration = wake_time - time.monotonic()
@@ -130,7 +132,10 @@ def score_article(client, article: dict) -> dict:
         "description": (article.get("description", "") or "")[:500],
         "url": article.get("url", "")
     }
-    prompt = SCORE_PROMPT.format(article_json=json.dumps(input_json, indent=2))
+    prompt = SCORE_PROMPT.format(
+        article_json=json.dumps(input_json, indent=2),
+        schema_json=json.dumps(ArticleScore.model_json_schema(), indent=2)
+    )
     
     try:
         validated = _call_gemini_score(client, prompt)
