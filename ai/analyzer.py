@@ -1,42 +1,41 @@
 import os
 import json
 import time
-import uuid
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field, ValidationError
 
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-3.5-flash-lite"
 
-BATCH_SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
+class ArticleScore(BaseModel):
+    relevance_score: int = Field(..., description="1-10 integer")
+    credibility_score: int = Field(..., description="1-10 integer")
+    impact_score: int = Field(..., description="1-10 integer")
+    category: str = Field(..., description="Exactly 'AI' or 'SAP'")
+    summary: str = Field(..., description="2-3 sentence factual summary in English")
+    telekom_relevance: str = Field(..., description="2-3 sentences explaining why this matters specifically to a manager at Deutsche Telekom.")
+    key_takeaway: str = Field(..., description="One punchy, highly practical sentence.")
+    translated_title: str = Field(..., description="Translate the title to English if it is not in English, otherwise copy the original")
+    translated_description: str = Field(..., description="Translate the description to English if it is not in English, otherwise copy the original")
+
+
+SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
 Deutsche Telekom is a leading European telecommunications provider with a strong interest in AI adoption, network automation, digital sovereignty, enterprise software (strategic partnership with SAP, BTP integration), security, and customer experience.
 
-I will provide you with a JSON list of news articles. Analyze EACH article and return a JSON object containing the scored results.
-Your output MUST be a JSON object with a single key "articles", which contains a list of objects in the EXACT same order as the input articles.
-
-For each article, return these exact keys:
-{{
-  "id": "<copy the id from the input>",
-  "relevance_score": <integer 1-10>,
-  "credibility_score": <integer 1-10>,
-  "impact_score": <integer 1-10>,
-  "category": "<Must be exactly 'AI' or 'SAP'>",
-  "summary": "<2-3 sentence factual summary in English>",
-  "telekom_relevance": "<2-3 sentences explaining why this matters specifically to a manager at Deutsche Telekom. Connect it to network ops, BTP/SAP partnership, cloud infrastructure, T-Systems, security, or enterprise services.>",
-  "key_takeaway": "<One punchy, highly practical sentence that this manager could quote in an executive meeting.>",
-  "translated_title": "<Translate the title to English if it is not in English, otherwise copy the original>",
-  "translated_description": "<Translate the description to English if it is not in English, otherwise copy the original>"
-}}
+Analyze the following article and return a JSON object containing the scored results.
+Your output MUST be a JSON object that strictly adheres to the requested schema.
 
 Scoring guide:
-- relevance_score: How relevant is this to a manager at a major telecom provider (Deutsche Telekom)?
+- relevance_score: How relevant is this to a manager at a major telecom provider (Deutsche Telekom)? (1-10)
 - credibility_score: How credible is the source/reporting? (10 = Reuters/FT/DW/Official PR, 1 = unknown blog)
-- impact_score: How much strategic or operational impact does this technology or event have?
+- impact_score: How much strategic or operational impact does this technology or event have? (1-10)
 
-Input Articles:
-{articles_json}
+Input Article:
+{article_json}
 
-IMPORTANT: Return ONLY a valid JSON object with the "articles" list. Ensure strictly valid JSON."""
+IMPORTANT: Extract information verbatim where possible. Do NOT infer or make up facts. Return ONLY a valid JSON object matching the required schema."""
 
 EXEC_SUMMARY_PROMPT = """You are a senior technology analyst writing a daily briefing for a Deutsche Telekom manager.
 
@@ -48,6 +47,7 @@ Articles:
 {articles_text}
 
 Rules: plain text only, no markdown headers, no asterisks, no bold tags."""
+
 
 API_DISPATCH_LOCK = threading.Lock()
 LAST_REQUEST_TIME = 0.0
@@ -65,28 +65,25 @@ def _client() -> genai.Client:
         raise ValueError("GEMINI_API_KEY is not set.")
     return genai.Client(api_key=api_key)
 
-def _call_gemini(client, prompt, response_format=None, max_tokens=8192, temperature=0.2, parse_json=False):
+def _call_gemini_score(client, prompt: str) -> ArticleScore:
     global LAST_REQUEST_TIME
 
-    config_kwargs = {
-        "temperature": temperature,
-        "max_output_tokens": max_tokens,
-    }
-    if response_format and response_format.get("type") == "json_object":
-        config_kwargs["response_mime_type"] = "application/json"
-        
-    config = types.GenerateContentConfig(**config_kwargs)
+    config = types.GenerateContentConfig(
+        temperature=0.2,
+        max_output_tokens=8192,
+        response_mime_type="application/json",
+    )
 
     for attempt in range(4):
         try:
-            # Enforce 5 RPM limit (12.1s spacing to be extremely safe)
-            # Since we only do ~5 requests total in the whole run, this guarantees no 429s.
             with API_DISPATCH_LOCK:
                 now = time.monotonic()
-                elapsed = now - LAST_REQUEST_TIME
-                if elapsed < 12.1:
-                    time.sleep(12.1 - elapsed)
-                LAST_REQUEST_TIME = time.monotonic()
+                wake_time = max(now, LAST_REQUEST_TIME + 2.1)
+                LAST_REQUEST_TIME = wake_time
+
+            sleep_duration = wake_time - time.monotonic()
+            if sleep_duration > 0:
+                time.sleep(sleep_duration)
 
             resp = client.models.generate_content(
                 model=MODEL_NAME,
@@ -94,26 +91,30 @@ def _call_gemini(client, prompt, response_format=None, max_tokens=8192, temperat
                 config=config
             )
             content = (resp.text or "").strip()
+            
+            # Clean possible markdown wrap just in case
+            clean = content.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
+            parsed_dict = json.loads(clean)
+            
+            # Pydantic validation guarantees NO slop
+            validated_score = ArticleScore.model_validate(parsed_dict)
+            return validated_score
 
-            if parse_json:
-                clean = content.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
-                parsed = json.loads(clean)
-                if not isinstance(parsed, dict):
-                    raise ValueError("Parsed JSON is not a dictionary.")
-                return parsed
-
-            return content
-
+        except ValidationError as ve:
+            t_print(f"      [Retry {attempt+1}/4] Gemini failed Pydantic validation: {ve}")
+            if attempt == 3:
+                raise
+            time.sleep(2)
         except Exception as exc:
             err_msg = str(exc)
             t_print(f"      [Retry {attempt+1}/4] Gemini failed: {err_msg}")
             if attempt == 3:
                 raise
             
-            # Dynamic backoff based on error type
+            # Dynamic backoff
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                t_print("      [Retry] 429 Quota Exceeded. Backing off for 65 seconds...")
-                time.sleep(65)
+                t_print("      [Retry] 429 Quota Exceeded. Backing off for 15 seconds...")
+                time.sleep(15)
             elif "503" in err_msg or "UNAVAILABLE" in err_msg:
                 t_print("      [Retry] 503 Service Unavailable. Backing off for 10 seconds...")
                 time.sleep(10)
@@ -121,6 +122,39 @@ def _call_gemini(client, prompt, response_format=None, max_tokens=8192, temperat
                 time.sleep(5)
 
     raise Exception("Gemini API failed after 4 attempts.")
+
+def score_article(client, article: dict) -> dict:
+    input_json = {
+        "title": article.get("title", ""),
+        "source": article.get("source", ""),
+        "description": (article.get("description", "") or "")[:500],
+        "url": article.get("url", "")
+    }
+    prompt = SCORE_PROMPT.format(article_json=json.dumps(input_json, indent=2))
+    
+    try:
+        validated = _call_gemini_score(client, prompt)
+        # Update article with validated schema values
+        article.update(validated.model_dump())
+        article["composite_score"] = (
+            validated.relevance_score * validated.credibility_score * validated.impact_score
+        )
+        article["title"] = validated.translated_title
+        article["description"] = validated.translated_description
+        article["translated"] = True
+        
+        # Restore original category if missing or changed, but trust validated category if valid
+        orig_cat = article.get("_original_category")
+        if orig_cat and validated.category not in ["AI", "SAP"]:
+            article["category"] = orig_cat
+        
+        t_print(f"[Gemini Score] Scored: {article.get('title', '')[:60]}")
+    except Exception as exc:
+        t_print(f"[Gemini Score] Error scoring article: {exc}")
+        article["composite_score"] = 0
+        article["telekom_relevance"] = "Failed to parse AI output."
+
+    return article
 
 def score_all(articles: list[dict]) -> list[dict]:
     if not os.environ.get("GEMINI_API_KEY", ""):
@@ -130,82 +164,16 @@ def score_all(articles: list[dict]) -> list[dict]:
     client = _client()
     scored_articles = []
     
-    # Assign temporary IDs to match them up later
     for a in articles:
-        a["_temp_id"] = str(uuid.uuid4())
-        # Preserve original category
         a["_original_category"] = a.get("category")
     
-    # Batch size 15 articles per request
-    chunk_size = 15
-    chunks = [articles[i:i + chunk_size] for i in range(0, len(articles), chunk_size)]
-    
-    t_print(f"[Gemini Score] Scoring {len(articles)} articles in {len(chunks)} batches...")
+    t_print(f"[Gemini Score] Scoring {len(articles)} articles individually using Gemini 3.5 Flash-Lite...")
 
-    for chunk_idx, chunk in enumerate(chunks):
-        t_print(f"[Gemini Score] Processing batch {chunk_idx + 1}/{len(chunks)} ({len(chunk)} articles)...")
-        
-        # Prepare lightweight JSON for prompt
-        input_json = []
-        for a in chunk:
-            input_json.append({
-                "id": a["_temp_id"],
-                "title": a.get("title", ""),
-                "source": a.get("source", ""),
-                "description": (a.get("description", "") or "")[:300],
-                "url": a.get("url", "")
-            })
-            
-        prompt = BATCH_SCORE_PROMPT.format(articles_json=json.dumps(input_json, indent=2))
-        
-        try:
-            result = _call_gemini(
-                client,
-                prompt,
-                response_format={"type": "json_object"},
-                parse_json=True
-            )
-            
-            returned_list = result.get("articles", [])
-            
-            # Map back to original articles
-            id_to_scores = {str(item.get("id")): item for item in returned_list if isinstance(item, dict)}
-            
-            for a in chunk:
-                scores = id_to_scores.get(str(a["_temp_id"]))
-                if scores:
-                    a.update(scores)
-                    a["composite_score"] = (
-                        int(scores.get("relevance_score", 0))
-                        * int(scores.get("credibility_score", 0))
-                        * int(scores.get("impact_score", 0))
-                    )
-                    # Use translated text
-                    a["title"] = scores.get("translated_title", a.get("title", ""))
-                    a["description"] = scores.get("translated_description", a.get("description", ""))
-                    a["translated"] = True
-                else:
-                    # Fallback if ID was missing from AI output
-                    a["composite_score"] = 0
-                    a["telekom_relevance"] = "Failed to parse AI output."
-                    
-                # Restore original category
-                if a.get("_original_category"):
-                    a["category"] = a["_original_category"]
-                    
-                valid_cats = {"AI", "SAP"}
-                if a.get("category") not in valid_cats:
-                    a["category"] = "AI"
-                    
-                scored_articles.append(a)
-                t_print(f"[Gemini Score] Scored: {a.get('title', '')[:60]}")
-                
-        except Exception as exc:
-            t_print(f"[Gemini Score] Error scoring batch {chunk_idx + 1}: {exc}")
-            # Add back with zero scores
-            for a in chunk:
-                a["composite_score"] = 0
-                scored_articles.append(a)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(score_article, client, a): a for a in articles}
+        for future in as_completed(futures):
+            scored = future.result()
+            scored_articles.append(scored)
 
     return scored_articles
 
@@ -219,13 +187,17 @@ def generate_executive_summary(articles: list[dict]) -> str:
     )
     prompt = EXEC_SUMMARY_PROMPT.format(articles_text=articles_text)
     try:
-        summary = _call_gemini(
-            client,
-            prompt,
-            response_format=None,
-            max_tokens=2048,
-            temperature=0.4
+        # Standard completion, no JSON needed
+        config = types.GenerateContentConfig(
+            temperature=0.4,
+            max_output_tokens=2048
         )
+        resp = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config=config
+        )
+        summary = (resp.text or "").strip()
         t_print(f"[Gemini Exec] Executive summary generated ({len(summary)} chars).")
         return summary
     except Exception as exc:
