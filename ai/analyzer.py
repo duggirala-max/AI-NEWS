@@ -4,7 +4,7 @@ import time
 from openai import OpenAI
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
+OPENROUTER_MODEL = "qwen/qwen-2.5-72b-instruct:free"
 
 SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
 Deutsche Telekom is a leading European telecommunications provider with a strong interest in AI adoption, network automation, digital sovereignty, enterprise software (strategic partnership with SAP, BTP integration), security, and customer experience.
@@ -159,7 +159,7 @@ def score_article(article: dict) -> dict:
 def score_all(articles: list[dict]) -> list[dict]:
     scored = []
     for i, article in enumerate(articles):
-        print(f"[Groq Score] Scoring {i+1}/{len(articles)}: {article.get('title', '')[:60]}")
+        print(f"[OpenRouter Score] Scoring {i+1}/{len(articles)}: {article.get('title', '')[:60]}")
         scored.append(score_article(article))
     return scored
 
@@ -181,8 +181,8 @@ def generate_executive_summary(articles: list[dict]) -> str:
         )
         time.sleep(2)
         summary = resp.choices[0].message.content.strip()
-        print(f"[Groq Exec] Executive summary generated ({len(summary)} chars).")
+        print(f"[OpenRouter Exec] Executive summary generated ({len(summary)} chars).")
         return summary
     except Exception as exc:
-        print(f"[Groq Exec] Error generating executive summary: {exc}")
-        return "Error generating executive briefing."
+        print(f"[OpenRouter Exec] Error generating executive summary: {exc}")
+        return "Executive summary generation failed."
