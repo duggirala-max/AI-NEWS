@@ -126,6 +126,7 @@ def run() -> None:
         # send_digest(top_articles, executive_summary)
         # Mark only the sent articles as seen so we don't repeat them
         # dedup_cache.add_seen_articles(top_articles) # Temporarily disabled for manual testing
+        pass
     except Exception as exc:
         print(f"[Email] Failed to send digest: {exc}")
         raise
