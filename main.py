@@ -87,7 +87,7 @@ def run() -> None:
         unseen_articles = ai_unseen[:35] + sap_unseen[:15]
 
     # 4. Score
-    print(f"\n[Step 3] Scoring {len(unseen_articles)} articles with Groq AI...")
+    print(f"\n[Step 3] Scoring {len(unseen_articles)} articles with OpenRouter AI...")
     scored_articles = analyzer.score_all(unseen_articles)
 
     # 5. Rank and split: Top 7 AI + Top 3 SAP
