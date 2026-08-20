@@ -87,7 +87,7 @@ def run() -> None:
         unseen_articles = ai_unseen[:35] + sap_unseen[:15]
 
     # 4. Score
-    print(f"\n[Step 3] Scoring {len(unseen_articles)} articles with OpenRouter AI...")
+    print(f"\n[Step 3] Scoring {len(unseen_articles)} articles with Gemini AI...")
     scored_articles = analyzer.score_all(unseen_articles)
 
     # 5. Rank and split: Top 7 AI + Top 3 SAP
@@ -123,9 +123,10 @@ def run() -> None:
     # 7. Send
     print("\n[Step 6] Sending email digest with PDF attachment...")
     try:
-        send_digest(top_articles, executive_summary)
+        # send_digest(top_articles, executive_summary)
         # Mark only the sent articles as seen so we don't repeat them
-        dedup_cache.add_seen_articles(top_articles)
+        # dedup_cache.add_seen_articles(top_articles)
+        pass
     except Exception as exc:
         print(f"[Email] Failed to send digest: {exc}")
         raise

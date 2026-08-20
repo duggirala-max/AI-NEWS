@@ -1,19 +1,12 @@
 import os
 import json
 import time
-import re
 import concurrent.futures
 import threading
 from openai import OpenAI
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODELS = [
-    "z-ai/glm-5.2:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "nvidia/nemotron-3.5-lightning:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free"
-]
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+MODEL_NAME = "gemini-1.5-flash"
 
 SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
 Deutsche Telekom is a leading European telecommunications provider with a strong interest in AI adoption, network automation, digital sovereignty, enterprise software (strategic partnership with SAP, BTP integration), security, and customer experience.
@@ -57,85 +50,64 @@ Articles:
 
 Rules: plain text only, no markdown headers, no asterisks, no bold tags."""
 
-BLACKLISTED_MODELS = set()
-BLACKLIST_LOCK = threading.Lock()
-
 API_DISPATCH_LOCK = threading.Lock()
 LAST_REQUEST_TIME = 0.0
 
 PRINT_LOCK = threading.Lock()
 
 def t_print(*args, **kwargs):
-    """Thread-safe print function"""
+    """Thread-safe print wrapper."""
     with PRINT_LOCK:
         print(*args, **kwargs)
 
 def _client() -> OpenAI:
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        raise ValueError("OPENROUTER_API_KEY is not set.")
-    return OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
+        raise ValueError("GEMINI_API_KEY is not set.")
+    return OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL)
 
-def _call_openrouter_with_fallback(client, prompt, response_format=None, max_tokens=4096, temperature=0.2, parse_json=False):
+def _call_gemini(client, prompt, response_format=None, max_tokens=4096, temperature=0.2, parse_json=False):
     global LAST_REQUEST_TIME
-    last_exc = None
-    
-    for model in OPENROUTER_MODELS:
-        with BLACKLIST_LOCK:
-            if model in BLACKLISTED_MODELS:
-                continue
-                
+
+    kwargs = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if response_format:
+        kwargs["response_format"] = response_format
+
+    for attempt in range(3):
         try:
-            kwargs = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            }
-            if response_format:
-                kwargs["response_format"] = response_format
-                
-            # Stagger requests by 1.5s globally to prevent 429 Concurrency Limits
+            # Rate-limit pacing INSIDE retry loop — enforces 15 RPM (4.1s spacing)
             with API_DISPATCH_LOCK:
                 now = time.monotonic()
                 elapsed = now - LAST_REQUEST_TIME
-                if elapsed < 1.5:
-                    time.sleep(1.5 - elapsed)
+                if elapsed < 4.1:
+                    time.sleep(4.1 - elapsed)
                 LAST_REQUEST_TIME = time.monotonic()
-                
+
             resp = client.chat.completions.create(**kwargs)
             content = (resp.choices[0].message.content or "").strip()
-            
+
             if parse_json:
-                parsed = None
-                try:
-                    parsed = json.loads(content)
-                except json.JSONDecodeError:
-                    match = re.search(r'\{.*\}', content, re.DOTALL)
-                    if match:
-                        try:
-                            parsed = json.loads(match.group(0))
-                        except Exception:
-                            raise ValueError(f"Regex extraction failed on {model}.")
-                    else:
-                        raise ValueError(f"Failed to parse JSON from {model}.")
-                        
+                # Strip markdown fences Gemini may wrap around JSON
+                clean = content.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
+                parsed = json.loads(clean)
                 if not isinstance(parsed, dict):
-                    raise ValueError(f"Parsed JSON is not a dictionary object on {model}.")
+                    raise ValueError("Parsed JSON is not a dictionary.")
                 return parsed
-                
+
             return content
-            
+
         except Exception as exc:
-            t_print(f"      [Fallback] Model {model} failed: {exc}")
-            if not isinstance(exc, (json.JSONDecodeError, ValueError)):
-                with BLACKLIST_LOCK:
-                    BLACKLISTED_MODELS.add(model)
-            last_exc = exc
-            
-    if last_exc is not None:
-        raise last_exc
-    raise Exception("All models in OPENROUTER_MODELS failed or are blacklisted.")
+            t_print(f"      [Retry {attempt+1}/3] Gemini failed: {exc}")
+            if attempt == 2:
+                raise
+            time.sleep(2)
+
+    raise Exception("Gemini API failed after 3 attempts.")
 
 def translate_article(article: dict) -> dict:
     """Translate title and description to English if non-ASCII characters are detected."""
@@ -144,7 +116,7 @@ def translate_article(article: dict) -> dict:
     has_non_ascii = any(ord(c) > 127 for c in title + description)
     if not has_non_ascii:
         return article
-    if not os.environ.get("OPENROUTER_API_KEY", ""):
+    if not os.environ.get("GEMINI_API_KEY", ""):
         return article
     try:
         client = _client()
@@ -153,7 +125,7 @@ def translate_article(article: dict) -> dict:
             "Return ONLY a valid JSON object with keys \"title\" and \"description\".\n\n"
             f"title: {title}\ndescription: {description[:300]}"
         )
-        data = _call_openrouter_with_fallback(
+        data = _call_gemini(
             client,
             prompt,
             response_format={"type": "json_object"},
@@ -168,19 +140,23 @@ def translate_article(article: dict) -> dict:
     return article
 
 def score_article(article: dict) -> dict:
-    if not os.environ.get("OPENROUTER_API_KEY", ""):
+    if not os.environ.get("GEMINI_API_KEY", ""):
+        # Fallback values if API key is not present
         article.update({
             "relevance_score": 5,
             "credibility_score": 5,
             "impact_score": 5,
             "composite_score": 125,
             "summary": article.get("description", "") or "No description available.",
-            "telekom_relevance": "N/A — OPENROUTER_API_KEY not set. Relevance cannot be assessed.",
-            "key_takeaway": "N/A — OPENROUTER_API_KEY not set."
+            "telekom_relevance": "N/A — GEMINI_API_KEY not set. Relevance cannot be assessed.",
+            "key_takeaway": "N/A — GEMINI_API_KEY not set."
         })
         return article
 
+    # Translate first if needed
     article = translate_article(article)
+
+    # Preserve original category from scrapers to prevent AI overwrite
     original_category = article.get("category")
 
     client = _client()
@@ -191,28 +167,32 @@ def score_article(article: dict) -> dict:
         url=article.get("url", ""),
     )
     try:
-        scores = _call_openrouter_with_fallback(
+        scores = _call_gemini(
             client,
             prompt,
             response_format={"type": "json_object"},
             parse_json=True
         )
         article.update(scores)
-        
+
+        # Calculate composite score (relevance * credibility * impact)
         article["composite_score"] = (
             int(scores.get("relevance_score", 0))
             * int(scores.get("credibility_score", 0))
             * int(scores.get("impact_score", 0))
         )
-        
+
+        # Restore original category
         if original_category:
             article["category"] = original_category
-            
+
+        # Ensure category is normalized
         valid_cats = {"AI", "SAP"}
         if article.get("category") not in valid_cats:
             article["category"] = article.get("category", "AI")
     except Exception as exc:
-        t_print(f"[OpenRouter Score] Error scoring '{article.get('title', '')}': {exc}")
+        t_print(f"[Gemini Score] Error scoring '{article.get('title', '')}': {exc}")
+        # Error fallback
         article.update({
             "relevance_score": 0,
             "credibility_score": 0,
@@ -226,8 +206,8 @@ def score_article(article: dict) -> dict:
 
 def score_all(articles: list[dict]) -> list[dict]:
     scored = [None] * len(articles)
-    t_print(f"[OpenRouter Score] Initiating concurrent scoring for {len(articles)} articles...")
-    
+    t_print(f"[Gemini Score] Scoring {len(articles)} articles concurrently...")
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(score_article, article): i for i, article in enumerate(articles)}
         for future in concurrent.futures.as_completed(futures):
@@ -236,15 +216,15 @@ def score_all(articles: list[dict]) -> list[dict]:
                 scored[idx] = future.result()
                 completed = sum(1 for x in scored if x is not None)
                 title_snip = scored[idx].get('title', '')[:60] if scored[idx] else 'Unknown'
-                t_print(f"[OpenRouter Score] Completed {completed}/{len(articles)}: {title_snip}")
+                t_print(f"[Gemini Score] Completed {completed}/{len(articles)}: {title_snip}")
             except Exception as exc:
-                t_print(f"[OpenRouter Score] Error scoring article {idx}: {exc}")
-                
+                t_print(f"[Gemini Score] Error scoring article {idx}: {exc}")
+
     return [s for s in scored if s is not None]
 
 def generate_executive_summary(articles: list[dict]) -> str:
-    if not os.environ.get("OPENROUTER_API_KEY", ""):
-        return "Executive summary not available: OPENROUTER_API_KEY is not set."
+    if not os.environ.get("GEMINI_API_KEY", ""):
+        return "Executive summary not available: GEMINI_API_KEY is not set."
     client = _client()
     articles_text = "\n".join(
         f"- [{a.get('category', 'AI')}] {a.get('title', '')} | {a.get('telekom_relevance', '')[:200]}"
@@ -252,15 +232,15 @@ def generate_executive_summary(articles: list[dict]) -> str:
     )
     prompt = EXEC_SUMMARY_PROMPT.format(articles_text=articles_text)
     try:
-        summary = _call_openrouter_with_fallback(
+        summary = _call_gemini(
             client,
             prompt,
             response_format=None,
             max_tokens=2048,
             temperature=0.4
         )
-        t_print(f"[OpenRouter Exec] Executive summary generated ({len(summary)} chars).")
+        t_print(f"[Gemini Exec] Executive summary generated ({len(summary)} chars).")
         return summary
     except Exception as exc:
-        t_print(f"[OpenRouter Exec] Error generating executive summary: {exc}")
+        t_print(f"[Gemini Exec] Error generating executive summary: {exc}")
         return "Executive summary generation failed."
