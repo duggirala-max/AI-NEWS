@@ -1,6 +1,9 @@
 import os
 import json
 import time
+import re
+import concurrent.futures
+import threading
 from openai import OpenAI
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -54,15 +57,34 @@ Articles:
 
 Rules: plain text only, no markdown headers, no asterisks, no bold tags."""
 
+BLACKLISTED_MODELS = set()
+BLACKLIST_LOCK = threading.Lock()
+
+API_DISPATCH_LOCK = threading.Lock()
+LAST_REQUEST_TIME = 0.0
+
+PRINT_LOCK = threading.Lock()
+
+def t_print(*args, **kwargs):
+    """Thread-safe print function"""
+    with PRINT_LOCK:
+        print(*args, **kwargs)
+
 def _client() -> OpenAI:
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY is not set.")
     return OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
-def _call_openrouter_with_fallback(client, prompt, response_format=None, max_tokens=4096, temperature=0.2):
+def _call_openrouter_with_fallback(client, prompt, response_format=None, max_tokens=4096, temperature=0.2, parse_json=False):
+    global LAST_REQUEST_TIME
     last_exc = None
+    
     for model in OPENROUTER_MODELS:
+        with BLACKLIST_LOCK:
+            if model in BLACKLISTED_MODELS:
+                continue
+                
         try:
             kwargs = {
                 "model": model,
@@ -73,14 +95,47 @@ def _call_openrouter_with_fallback(client, prompt, response_format=None, max_tok
             if response_format:
                 kwargs["response_format"] = response_format
                 
+            # Stagger requests by 1.5s globally to prevent 429 Concurrency Limits
+            with API_DISPATCH_LOCK:
+                now = time.monotonic()
+                elapsed = now - LAST_REQUEST_TIME
+                if elapsed < 1.5:
+                    time.sleep(1.5 - elapsed)
+                LAST_REQUEST_TIME = time.monotonic()
+                
             resp = client.chat.completions.create(**kwargs)
-            time.sleep(2)
-            return resp.choices[0].message.content.strip()
+            content = (resp.choices[0].message.content or "").strip()
+            
+            if parse_json:
+                parsed = None
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    match = re.search(r'\{.*\}', content, re.DOTALL)
+                    if match:
+                        try:
+                            parsed = json.loads(match.group(0))
+                        except Exception:
+                            raise ValueError(f"Regex extraction failed on {model}.")
+                    else:
+                        raise ValueError(f"Failed to parse JSON from {model}.")
+                        
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"Parsed JSON is not a dictionary object on {model}.")
+                return parsed
+                
+            return content
+            
         except Exception as exc:
-            print(f"      [Fallback] Model {model} failed: {exc}")
+            t_print(f"      [Fallback] Model {model} failed: {exc}")
+            if not isinstance(exc, (json.JSONDecodeError, ValueError)):
+                with BLACKLIST_LOCK:
+                    BLACKLISTED_MODELS.add(model)
             last_exc = exc
-            time.sleep(2)
-    raise last_exc
+            
+    if last_exc is not None:
+        raise last_exc
+    raise Exception("All models in OPENROUTER_MODELS failed or are blacklisted.")
 
 def translate_article(article: dict) -> dict:
     """Translate title and description to English if non-ASCII characters are detected."""
@@ -98,23 +153,22 @@ def translate_article(article: dict) -> dict:
             "Return ONLY a valid JSON object with keys \"title\" and \"description\".\n\n"
             f"title: {title}\ndescription: {description[:300]}"
         )
-        raw = _call_openrouter_with_fallback(
+        data = _call_openrouter_with_fallback(
             client,
             prompt,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            parse_json=True
         )
-        data = json.loads(raw)
         article["title"] = data.get("title", title)
         article["description"] = data.get("description", description)
         article["translated"] = True
-        print(f"[Translate] Translated: {article['title'][:60]}")
+        t_print(f"[Translate] Translated: {article['title'][:60]}")
     except Exception as exc:
-        print(f"[Translate] Error translating '{title[:40]}': {exc}")
+        t_print(f"[Translate] Error translating '{title[:40]}': {exc}")
     return article
 
 def score_article(article: dict) -> dict:
     if not os.environ.get("OPENROUTER_API_KEY", ""):
-        # Fallback values if API key is not present
         article.update({
             "relevance_score": 5,
             "credibility_score": 5,
@@ -126,10 +180,7 @@ def score_article(article: dict) -> dict:
         })
         return article
 
-    # Translate first if needed
     article = translate_article(article)
-
-    # Preserve original category from scrapers to prevent AI overwrite
     original_category = article.get("category")
 
     client = _client()
@@ -140,32 +191,28 @@ def score_article(article: dict) -> dict:
         url=article.get("url", ""),
     )
     try:
-        raw = _call_openrouter_with_fallback(
+        scores = _call_openrouter_with_fallback(
             client,
             prompt,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            parse_json=True
         )
-        scores = json.loads(raw)
         article.update(scores)
         
-        # Calculate composite score (relevance * credibility * impact)
         article["composite_score"] = (
             int(scores.get("relevance_score", 0))
             * int(scores.get("credibility_score", 0))
             * int(scores.get("impact_score", 0))
         )
         
-        # Restore original category
         if original_category:
             article["category"] = original_category
             
-        # Ensure category is normalized
         valid_cats = {"AI", "SAP"}
         if article.get("category") not in valid_cats:
             article["category"] = article.get("category", "AI")
     except Exception as exc:
-        print(f"[OpenRouter Score] Error scoring '{article.get('title', '')}': {exc}")
-        # Error fallback
+        t_print(f"[OpenRouter Score] Error scoring '{article.get('title', '')}': {exc}")
         article.update({
             "relevance_score": 0,
             "credibility_score": 0,
@@ -178,11 +225,22 @@ def score_article(article: dict) -> dict:
     return article
 
 def score_all(articles: list[dict]) -> list[dict]:
-    scored = []
-    for i, article in enumerate(articles):
-        print(f"[OpenRouter Score] Scoring {i+1}/{len(articles)}: {article.get('title', '')[:60]}")
-        scored.append(score_article(article))
-    return scored
+    scored = [None] * len(articles)
+    t_print(f"[OpenRouter Score] Initiating concurrent scoring for {len(articles)} articles...")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(score_article, article): i for i, article in enumerate(articles)}
+        for future in concurrent.futures.as_completed(futures):
+            idx = futures[future]
+            try:
+                scored[idx] = future.result()
+                completed = sum(1 for x in scored if x is not None)
+                title_snip = scored[idx].get('title', '')[:60] if scored[idx] else 'Unknown'
+                t_print(f"[OpenRouter Score] Completed {completed}/{len(articles)}: {title_snip}")
+            except Exception as exc:
+                t_print(f"[OpenRouter Score] Error scoring article {idx}: {exc}")
+                
+    return [s for s in scored if s is not None]
 
 def generate_executive_summary(articles: list[dict]) -> str:
     if not os.environ.get("OPENROUTER_API_KEY", ""):
@@ -201,8 +259,8 @@ def generate_executive_summary(articles: list[dict]) -> str:
             max_tokens=2048,
             temperature=0.4
         )
-        print(f"[OpenRouter Exec] Executive summary generated ({len(summary)} chars).")
+        t_print(f"[OpenRouter Exec] Executive summary generated ({len(summary)} chars).")
         return summary
     except Exception as exc:
-        print(f"[OpenRouter Exec] Error generating executive summary: {exc}")
+        t_print(f"[OpenRouter Exec] Error generating executive summary: {exc}")
         return "Executive summary generation failed."
