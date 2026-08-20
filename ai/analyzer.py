@@ -1,10 +1,24 @@
 import os
 import json
 import time
+import re
 from openai import OpenAI
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_MODEL = "qwen/qwen3.6-27b"
+
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> blocks that Qwen reasoning models emit."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+def _extract_json(text: str) -> dict:
+    """Extract the first JSON object from a string, ignoring surrounding text."""
+    text = _strip_think(text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError(f"No JSON object found in response: {text[:200]}")
+    return json.loads(text[start:end + 1])
 
 SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
 Deutsche Telekom is a leading European telecommunications provider with a strong interest in AI adoption, network automation, digital sovereignty, enterprise software (strategic partnership with SAP, BTP integration), security, and customer experience.
@@ -73,9 +87,11 @@ def translate_article(article: dict) -> dict:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            max_tokens=4096,
+            temperature=0.2,
         )
-        data = json.loads(resp.choices[0].message.content.strip())
+        time.sleep(2)
+        data = _extract_json(resp.choices[0].message.content)
         article["title"] = data.get("title", title)
         article["description"] = data.get("description", description)
         article["translated"] = True
@@ -115,10 +131,12 @@ def score_article(article: dict) -> dict:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            max_tokens=4096,
+            temperature=0.2,
         )
-        raw = resp.choices[0].message.content.strip()
-        scores = json.loads(raw)
+        time.sleep(2)
+        raw = resp.choices[0].message.content
+        scores = _extract_json(raw)
         article.update(scores)
         
         # Calculate composite score (relevance * credibility * impact)
@@ -155,8 +173,6 @@ def score_all(articles: list[dict]) -> list[dict]:
     for i, article in enumerate(articles):
         print(f"[Groq Score] Scoring {i+1}/{len(articles)}: {article.get('title', '')[:60]}")
         scored.append(score_article(article))
-        if i < len(articles) - 1:
-            time.sleep(4.5)  # Rate limit: max 30 requests / min on Groq free tier
     return scored
 
 def generate_executive_summary(articles: list[dict]) -> str:
@@ -172,8 +188,11 @@ def generate_executive_summary(articles: list[dict]) -> str:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=2048,
+            temperature=0.4,
         )
-        summary = resp.choices[0].message.content.strip()
+        time.sleep(2)
+        summary = _strip_think(resp.choices[0].message.content).strip()
         print(f"[Groq Exec] Executive summary generated ({len(summary)} chars).")
         return summary
     except Exception as exc:
