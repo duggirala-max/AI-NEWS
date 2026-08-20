@@ -1,9 +1,10 @@
 import os
 import json
+import time
 from openai import OpenAI
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-GROQ_MODEL = "llama3-70b-8192"
+GROQ_MODEL = "qwen/qwen3.6-27b"
 
 SCORE_PROMPT = """You are a senior enterprise technology and telecom analyst. The reader is a manager working at Deutsche Telekom.
 Deutsche Telekom is a leading European telecommunications provider with a strong interest in AI adoption, network automation, digital sovereignty, enterprise software (strategic partnership with SAP, BTP integration), security, and customer experience.
@@ -154,6 +155,8 @@ def score_all(articles: list[dict]) -> list[dict]:
     for i, article in enumerate(articles):
         print(f"[Groq Score] Scoring {i+1}/{len(articles)}: {article.get('title', '')[:60]}")
         scored.append(score_article(article))
+        if i < len(articles) - 1:
+            time.sleep(4.5)  # Rate limit: max 30 requests / min on Groq free tier
     return scored
 
 def generate_executive_summary(articles: list[dict]) -> str:
